@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.log
+/publish/
+/artifacts/
+/config.json
+/config.broken.json
+/config.json.tmp
