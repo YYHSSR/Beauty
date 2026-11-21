@@ -8,8 +8,13 @@ internal static class Program
     static void Main(string[] args)
     {
         bool openSettings = args.Any(a => a.Equals("--settings", StringComparison.OrdinalIgnoreCase));
+        bool toggleDock = args.Any(a => a.Equals(DesktopDockMenu.ToggleArgument, StringComparison.OrdinalIgnoreCase));
         using var mutex = new Mutex(true, "BeautyDock.SingleInstance", out bool isFirst);
-        if (!isFirst) return; // 已经在运行
+        if (!isFirst)
+        {
+            if (toggleDock) DesktopDockMenu.ToggleRunningDock();
+            return;
+        }
 
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         app.DispatcherUnhandledException += (_, e) =>
@@ -19,6 +24,7 @@ internal static class Program
         };
 
         var dock = new DockWindow(DockConfig.Load(), openSettings);
+        DesktopDockMenu.Update(hidden: false);
         dock.Show();
         app.Run();
     }

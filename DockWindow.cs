@@ -19,9 +19,11 @@ internal sealed class DockWindow : Window
     readonly Rectangle hitStrip = new() { Fill = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)) };
     readonly Border background = new() { CornerRadius = new CornerRadius(12), IsHitTestVisible = false };
     readonly List<DockItemView> views = new();
-    readonly DispatcherTimer runningTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    readonly DispatcherTimer runningRefresh = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(120) };
+    readonly DispatcherTimer runningFallback = new(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(5) };
+    readonly WindowEvents windowEvents;
+    readonly DesktopDoubleClick desktopDoubleClick;
     IntPtr hwnd;
-    uint shellMsg;
     double dpi = 1.0;
 
     FileSystemWatcher? watcher;
@@ -43,8 +45,10 @@ internal sealed class DockWindow : Window
     public DockWindow(DockConfig config, bool openSettingsOnStart = false)
     {
         cfg = config;
+        windowEvents = new WindowEvents(OnWindowChanged);
+        desktopDoubleClick = new DesktopDoubleClick(Dispatcher, ShowDock);
         if (openSettingsOnStart) Loaded += (_, _) => OpenSettings();
-        Title = "Beauty Dock";
+        Title = DesktopDockMenu.WindowTitle;
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -64,18 +68,24 @@ internal sealed class DockWindow : Window
         MouseRightButtonUp += OnRightClick;
         DragOver += OnDragOver;
         Drop += OnDrop;
-        runningTimer.Tick += (_, _) => RefreshRunning();
+        runningRefresh.Tick += (_, _) =>
+        {
+            runningRefresh.Stop();
+            RefreshRunning();
+        };
+        runningFallback.Tick += (_, _) => RefreshRunning();
+        IsVisibleChanged += (_, _) => UpdateRunningTracking();
         SystemParameters.StaticPropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(SystemParameters.WorkArea)) Dispatcher.BeginInvoke(() => Relayout(false));
         };
         Closed += (_, _) =>
         {
-            if (hwnd != IntPtr.Zero) Native.DeregisterShellHookWindow(hwnd);
+            desktopDoubleClick.Dispose();
+            StopRunningTracking();
             watcher?.Dispose();
             reloadTimer?.Stop();
             saveTimer?.Stop();
-            runningTimer.Stop();
         };
     }
 
@@ -85,12 +95,11 @@ internal sealed class DockWindow : Window
         Native.AddExStyle(hwnd, Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE);
         dpi = VisualTreeHelper.GetDpi(this).DpiScaleY;
 
-        shellMsg = Native.RegisterWindowMessage("SHELLHOOK");
-        Native.RegisterShellHookWindow(hwnd);
         HwndSource.FromHwnd(hwnd)!.AddHook(WndProc);
 
+        bool relocated = ItemLocator.RelocateMissing(cfg);
         Rebuild();
-        runningTimer.Start();
+        if (relocated) SaveConfig();
         StartWatcher();
     }
 
@@ -110,8 +119,7 @@ internal sealed class DockWindow : Window
         foreach (var item in cfg.Items)
         {
             var v = new DockItemView(item, S, Headroom, cfg.Reflection);
-            v.MouseEnter += (_, _) => { if (!dragging) v.HoverStart(cfg.Effects.Hover); };
-            v.MouseLeave += (_, _) => v.HoverStop();
+            v.MouseEnter += (_, _) => { if (!dragging) v.Bounce(); };
             v.MouseLeftButtonDown += (_, e) =>
             {
                 pressed = v;
@@ -123,8 +131,8 @@ internal sealed class DockWindow : Window
             root.Children.Add(v);
         }
         Relayout(false);
-        if (refreshRunning) RefreshRunning();
-        else ApplyRunning(); // 用上一次的窗口快照，不重新枚举（每秒的定时器会再刷新）
+        UpdateTrackedExecutables();
+        UpdateRunningTracking(refreshRunning);
     }
 
     void Relayout(bool animate)
@@ -177,14 +185,72 @@ internal sealed class DockWindow : Window
     Point IconCenterOnScreen(DockItemView v) =>
         new(Left + Canvas.GetLeft(v) + S / 2, Top + Headroom + S / 2);
 
-    // ================= 运行指示器 / 求关注 =================
+    // ================= 运行指示器 =================
 
-    Dictionary<string, List<IntPtr>> running = new();
+    Dictionary<string, List<IntPtr>> running = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<IntPtr> runningWindows = new();
+    readonly HashSet<string> trackedExecutables = new(StringComparer.OrdinalIgnoreCase);
+    bool trackingWindows;
+
+    void UpdateTrackedExecutables()
+    {
+        trackedExecutables.Clear();
+        foreach (var view in views)
+            if (view.ExeName != null) trackedExecutables.Add(view.ExeName);
+    }
+
+    void UpdateRunningTracking(bool refresh = true)
+    {
+        if (hwnd == IntPtr.Zero || !IsVisible || !cfg.ShowRunningIndicators || trackedExecutables.Count == 0)
+        {
+            StopRunningTracking();
+            ApplyRunning();
+            return;
+        }
+
+        if (!trackingWindows)
+        {
+            trackingWindows = true;
+            if (!windowEvents.Start()) runningFallback.Start();
+            refresh = true;
+        }
+        if (refresh) RefreshRunning();
+        else ApplyRunning();
+    }
+
+    void StopRunningTracking()
+    {
+        if (!trackingWindows) return;
+        trackingWindows = false;
+        windowEvents.Dispose();
+        runningRefresh.Stop();
+        runningFallback.Stop();
+        running.Clear();
+        runningWindows.Clear();
+    }
 
     void RefreshRunning()
     {
-        running = WindowTracker.Snapshot();
+        if (!trackingWindows) return;
+        running = WindowTracker.Snapshot(trackedExecutables);
+        runningWindows.Clear();
+        foreach (var windows in running.Values) runningWindows.UnionWith(windows);
         ApplyRunning();
+    }
+
+    void OnWindowChanged(IntPtr hook, uint change, IntPtr window, int objectId, int childId, uint thread, uint timestamp)
+    {
+        if (!trackingWindows || runningRefresh.IsEnabled || window == IntPtr.Zero || objectId != 0 || childId != 0) return;
+        if (runningWindows.Contains(window))
+        {
+            if (change == Native.EVENT_OBJECT_NAMECHANGE && Native.GetWindowTextLength(window) != 0) return;
+        }
+        else
+        {
+            if (change is Native.EVENT_OBJECT_DESTROY or Native.EVENT_OBJECT_HIDE or Native.EVENT_OBJECT_CLOAKED) return;
+            if (!WindowTracker.IsAppWindow(window) || WindowTracker.ExeOf(window) is not { } exe || !trackedExecutables.Contains(exe)) return;
+        }
+        runningRefresh.Start();
     }
 
     void ApplyRunning()
@@ -195,31 +261,36 @@ internal sealed class DockWindow : Window
 
     IntPtr WndProc(IntPtr h, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (shellMsg != 0 && msg == shellMsg)
+        if (DesktopDockMenu.ToggleMessage != 0 && msg == DesktopDockMenu.ToggleMessage)
         {
-            int code = wParam.ToInt32();
-            if (code == Native.HSHELL_FLASH) OnFlash(lParam);
-            else if (code is Native.HSHELL_WINDOWCREATED or Native.HSHELL_WINDOWDESTROYED)
-                Dispatcher.BeginInvoke(RefreshRunning, DispatcherPriority.Background);
+            handled = true;
+            Dispatcher.BeginInvoke(ToggleDock);
         }
         return IntPtr.Zero;
     }
 
-    void OnFlash(IntPtr window)
+    void ToggleDock()
     {
-        if (!DockItemView.Is(cfg.Effects.Attention, "sonicboom")) return;
-        var exe = WindowTracker.ExeOf(window);
-        if (exe == null) return;
-        foreach (var v in views)
+        if (!IsVisible)
         {
-            if (v.ExeName == null || !v.ExeName.Equals(exe, StringComparison.OrdinalIgnoreCase)) continue;
-            if ((DateTime.Now - v.LastAttention).TotalSeconds < 2.5) continue; // 别连着刷
-            v.LastAttention = DateTime.Now;
-            const int bursts = 3;
-            const double interval = 0.6;
-            v.Punch(bursts, interval);
-            Effects.SonicBoom(IconCenterOnScreen(v), S, bursts, interval);
+            ShowDock();
+            return;
         }
+        if (!desktopDoubleClick.Start())
+        {
+            Program.Log("无法注册桌面双击恢复。");
+            return;
+        }
+        if (IsMouseCaptured) ReleaseMouseCapture();
+        Hide();
+        DesktopDockMenu.Update(hidden: true);
+    }
+
+    void ShowDock()
+    {
+        desktopDoubleClick.Dispose();
+        Show();
+        DesktopDockMenu.Update(hidden: false);
     }
 
     // ================= 点击启动 =================
@@ -235,6 +306,23 @@ internal sealed class DockWindow : Window
         }
         if (!forceNew && ToggleExisting(v)) return;
 
+        // 快捷方式被挪走了：先按文件名找回来，找回后刷新图标再打开。
+        if (!ItemLocator.Exists(item.Path))
+        {
+            if (!ItemLocator.RelocateMissing(cfg))
+            {
+                MessageBox.Show(
+                    $"找不到 “{item.Label}”。\n\n原来的位置：{item.Path}\n\n它可能被移动、改名或删除了。请右键这个图标选择「从 Dock 中移除」，再把新的快捷方式拖到 Dock 上。",
+                    "Beauty Dock", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            SaveConfig();
+            IconLoader.ClearCache();
+            DockItemView.ClearCache();
+            Rebuild();
+            v = views.FirstOrDefault(x => ReferenceEquals(x.Item, item)) ?? v;
+        }
+
         try
         {
             var path = Environment.ExpandEnvironmentVariables(item.Path);
@@ -247,7 +335,7 @@ internal sealed class DockWindow : Window
                 WorkingDirectory = Directory.Exists(dir) ? dir : "",
             });
             if (launched != null) Native.AllowSetForegroundWindow(launched.Id);
-            if (DockItemView.Is(cfg.Effects.Launch, "bounce")) v.Bounce();
+            v.Bounce();
         }
         catch (Exception ex)
         {
@@ -261,8 +349,8 @@ internal sealed class DockWindow : Window
         if (v.ExeName == null) return false;
         // 两个图标指向同一个程序（例如两个 Chrome 用户），分不清是哪个窗口，就直接打开新的。
         if (views.Count(o => o.ExeName != null && o.ExeName.Equals(v.ExeName, StringComparison.OrdinalIgnoreCase)) > 1) return false;
-        RefreshRunning();
-        if (!running.TryGetValue(v.ExeName, out var windows) || windows.Count == 0) return false;
+        var matching = WindowTracker.Snapshot(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { v.ExeName });
+        if (!matching.TryGetValue(v.ExeName, out var windows)) return false;
 
         var fg = Native.GetForegroundWindow();
         if (windows.Contains(fg))
@@ -288,7 +376,7 @@ internal sealed class DockWindow : Window
         {
             if ((p - pressPos).Length < 6) return;
             dragging = true;
-            pressed.HoverStop();
+            pressed.StopBounce();
             pressed.Opacity = 0;
             var img = new Image { Source = pressed.IconSource, Width = S, Height = S };
             RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
@@ -363,9 +451,11 @@ internal sealed class DockWindow : Window
         var center = at ?? IconCenterOnScreen(v);
         cfg.Items.Remove(v.Item);
         root.Children.Remove(v);
+        UpdateTrackedExecutables();
+        UpdateRunningTracking();
         IconLoader.PruneCache(cfg.Items);
         DockItemView.PruneCache(cfg.Items);
-        if (DockItemView.Is(cfg.Effects.Delete, "explosion")) Effects.Explosion(center, S);
+        Effects.Explosion(center, S);
         Relayout(false);
         SaveConfig();
     }
@@ -390,9 +480,9 @@ internal sealed class DockWindow : Window
     {
         var v = FindView(e.OriginalSource as DependencyObject);
         var menu = new ContextMenu();
-        void Add(string header, Action act)
+        void Add(string header, Action act, Image? icon = null)
         {
-            var mi = new MenuItem { Header = header };
+            var mi = new MenuItem { Header = header, Icon = icon };
             mi.Click += (_, _) => act();
             menu.Items.Add(mi);
         }
@@ -413,6 +503,7 @@ internal sealed class DockWindow : Window
         int insertAt = v != null ? views.IndexOf(v) + 1 : cfg.Items.Count;
         Add("添加到 Dock…", () => AddByDialog(insertAt));
         Add("Dock 设置…", OpenSettings);
+        Add("隐藏 Dock", ToggleDock, DesktopDockMenu.CreateIcon());
 
         Activate(); // 不激活的话，点菜单外面菜单关不掉
         menu.PlacementTarget = this;
@@ -490,7 +581,7 @@ internal sealed class DockWindow : Window
         switch (change)
         {
             case SettingChange.Topmost: Topmost = cfg.Topmost; break;
-            case SettingChange.Indicators: RefreshRunning(); break;
+            case SettingChange.Indicators: UpdateRunningTracking(); break;
             case SettingChange.Position: ScheduleRefresh(rebuild: false); break;
             case SettingChange.Rebuild: ScheduleRefresh(rebuild: true); break;
         }
@@ -542,7 +633,9 @@ internal sealed class DockWindow : Window
         settings?.UpdateConfig(cfg);
         IconLoader.ClearCache();
         DockItemView.ClearCache();
+        bool relocated = ItemLocator.RelocateMissing(cfg);
         Rebuild();
+        if (relocated) SaveConfig();
     }
 
     /// <summary>手动改了 config.json 并保存后，自动重新加载。</summary>

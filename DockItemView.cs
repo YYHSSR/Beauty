@@ -7,21 +7,18 @@ using IOPath = System.IO.Path;
 
 namespace BeautyDock;
 
-/// <summary>Dock 上一个图标的画面：图标本体、倒影、运行指示器，以及悬停 / 启动 / 求关注动画。</summary>
+/// <summary>Dock 上的图标、倒影、运行指示器和弹跳动画。</summary>
 internal sealed class DockItemView : Canvas
 {
     public DockItem Item { get; }
     public ImageSource IconSource { get; }
     /// <summary>用于匹配运行中窗口的进程名（如 chrome.exe），可能为空。</summary>
     public string? ExeName { get; }
-    public DateTime LastAttention { get; set; }
 
     readonly double s, top;
     readonly TranslateTransform iconMove = new(), reflMove = new();
-    readonly ScaleTransform iconScale, reflScale;
     readonly Ellipse indicator;
-    bool hovering, bouncing, isRunning;
-    string hoverFx = "jump";
+    bool isRunning;
 
     public DockItemView(DockItem item, double size, double iconTop, double reflection)
     {
@@ -39,18 +36,16 @@ internal sealed class DockItemView : Canvas
         Children.Add(hit);
 
         var icon = MakeImage();
-        iconScale = new ScaleTransform(1, 1, s / 2, s); // 以底边为中心缩放
-        icon.RenderTransform = new TransformGroup { Children = { iconScale, iconMove } };
+        icon.RenderTransform = iconMove;
         SetTop(icon, top);
         Children.Add(icon);
 
-        reflScale = new ScaleTransform(1, 1, s / 2, 0);
         if (reflection > 0)
         {
             var refl = MakeImage();
             refl.RenderTransform = new TransformGroup
             {
-                Children = { new ScaleTransform(1, -1, s / 2, s / 2), reflScale, reflMove },
+                Children = { new ScaleTransform(1, -1, s / 2, s / 2), reflMove },
             };
             // 本地坐标里图标底部在下方，翻转后变成倒影的顶部。
             refl.OpacityMask = new LinearGradientBrush
@@ -146,94 +141,24 @@ internal sealed class DockItemView : Canvas
         indicator.BeginAnimation(OpacityProperty, new DoubleAnimation(running ? 1 : 0, TimeSpan.FromMilliseconds(250)));
     }
 
-    // ---------- 悬停：跳动 ----------
-
-    public void HoverStart(string fx)
-    {
-        hovering = true;
-        hoverFx = fx;
-        if (bouncing) return;
-        bool forever = Is(fx, "jump");
-        if (!forever && !Is(fx, "jumpOnce")) return;
-        double h = s * 0.32;
-        MoveY(Hops(new[] { h }, 0.36, forever ? 0.18 : 0, 1, forever),
-              Hops(new[] { h }, 0.36, forever ? 0.18 : 0, -1, forever));
-    }
-
-    public void HoverStop()
-    {
-        hovering = false;
-        if (!bouncing) Settle();
-    }
-
-    // ---------- 启动：弹跳 ----------
-
+    // ---------- 悬停和启动：弹跳 ----------
     public void Bounce()
     {
-        bouncing = true;
-        var heights = new[] { s * 0.9, s * 0.55, s * 0.25 };
-        var up = Hops(heights, 0.42, 0, 1, false);
-        up.Completed += (_, _) =>
-        {
-            bouncing = false;
-            if (hovering) HoverStart(hoverFx);
-        };
-        MoveY(up, Hops(heights, 0.42, 0, -1, false));
+        double height = s * 0.32;
+        iconMove.BeginAnimation(TranslateTransform.YProperty, CreateBounce(-height));
+        reflMove.BeginAnimation(TranslateTransform.YProperty, CreateBounce(height));
     }
 
-    // ---------- 求关注：图标随音爆冲击一下 ----------
-
-    public void Punch(int times, double interval)
+    public void StopBounce()
     {
-        var a = new DoubleAnimationUsingKeyFrames();
-        for (int i = 0; i < times; i++)
-        {
-            double t = i * interval;
-            a.KeyFrames.Add(new LinearDoubleKeyFrame(1, KT(t)));
-            a.KeyFrames.Add(new EasingDoubleKeyFrame(1.25, KT(t + 0.1), new QuadraticEase { EasingMode = EasingMode.EaseOut }));
-            a.KeyFrames.Add(new EasingDoubleKeyFrame(1, KT(t + 0.32), new ElasticEase { Oscillations = 1, Springiness = 4 }));
-        }
-        foreach (var st in new[] { iconScale, reflScale })
-        {
-            st.BeginAnimation(ScaleTransform.ScaleXProperty, a);
-            st.BeginAnimation(ScaleTransform.ScaleYProperty, a);
-        }
+        iconMove.BeginAnimation(TranslateTransform.YProperty, null);
+        reflMove.BeginAnimation(TranslateTransform.YProperty, null);
     }
 
-    // ---------- 工具 ----------
-
-    void Settle()
+    static DoubleAnimation CreateBounce(double offset) => new(0, offset, TimeSpan.FromMilliseconds(180))
     {
-        double cur = iconMove.Y;
-        var d = TimeSpan.FromMilliseconds(150);
-        MoveY(new DoubleAnimation(cur, 0, d), new DoubleAnimation(-cur, 0, d));
-    }
-
-    void MoveY(AnimationTimeline icon, AnimationTimeline mirror)
-    {
-        iconMove.BeginAnimation(TranslateTransform.YProperty, icon);
-        reflMove.BeginAnimation(TranslateTransform.YProperty, mirror);
-    }
-
-    /// <summary>一串跳跃：每一跳先减速上升再加速落下。sign = -1 用于倒影（反方向）。</summary>
-    static DoubleAnimationUsingKeyFrames Hops(double[] heights, double hopTime, double pause, double sign, bool forever)
-    {
-        var a = new DoubleAnimationUsingKeyFrames();
-        double t = 0;
-        a.KeyFrames.Add(new LinearDoubleKeyFrame(0, KT(0)));
-        foreach (var h in heights)
-        {
-            t += hopTime / 2;
-            a.KeyFrames.Add(new EasingDoubleKeyFrame(-h * sign, KT(t), new QuadraticEase { EasingMode = EasingMode.EaseOut }));
-            t += hopTime / 2;
-            a.KeyFrames.Add(new EasingDoubleKeyFrame(0, KT(t), new QuadraticEase { EasingMode = EasingMode.EaseIn }));
-        }
-        t += pause;
-        a.Duration = TimeSpan.FromSeconds(t);
-        if (forever) a.RepeatBehavior = RepeatBehavior.Forever;
-        return a;
-    }
-
-    static KeyTime KT(double seconds) => KeyTime.FromTimeSpan(TimeSpan.FromSeconds(seconds));
-    public static bool Is(string? value, string name) => string.Equals(value, name, StringComparison.OrdinalIgnoreCase);
+        AutoReverse = true,
+        FillBehavior = FillBehavior.Stop,
+        EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
+    };
 }

@@ -25,18 +25,6 @@ public sealed class DockItem
     [JsonIgnore] public bool IsStartMenu => Path == StartMenuPath;
 }
 
-public sealed class EffectsConfig
-{
-    /// <summary>鼠标悬停：jump（悬停时持续跳动）/ jumpOnce（跳一下）/ none</summary>
-    public string Hover { get; set; } = "jump";
-    /// <summary>启动程序：bounce（弹跳）/ none</summary>
-    public string Launch { get; set; } = "bounce";
-    /// <summary>程序闪烁求关注：sonicboom（音爆）/ none</summary>
-    public string Attention { get; set; } = "sonicboom";
-    /// <summary>把图标拖出 Dock 删除：explosion（爆炸）/ none</summary>
-    public string Delete { get; set; } = "explosion";
-}
-
 public sealed class DockConfig
 {
     /// <summary>图标尺寸（与 Nexus 相同的单位，随系统缩放自动放大）。</summary>
@@ -54,7 +42,6 @@ public sealed class DockConfig
     /// <summary>是否始终置顶。false = 和其它窗口一样。</summary>
     public bool Topmost { get; set; } = false;
     public bool ShowRunningIndicators { get; set; } = true;
-    public EffectsConfig Effects { get; set; } = new();
     public List<DockItem> Items { get; set; } = new();
 
     public static string Dir { get; } = IOPath.Combine(
@@ -152,7 +139,6 @@ public sealed class DockConfig
         c.Alignment = Math.Clamp(c.Alignment, -100, 100);
         c.Reflection = Math.Clamp(c.Reflection, 0, 1);
         c.BackgroundOpacity = Math.Clamp(c.BackgroundOpacity, 0, 1);
-        c.Effects ??= new EffectsConfig();
         c.Items ??= new List<DockItem>();
         c.Items.RemoveAll(i => i == null || string.IsNullOrWhiteSpace(i.Path));
         return c;

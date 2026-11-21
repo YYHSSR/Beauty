@@ -251,7 +251,7 @@ internal static class WindowTracker
     static DateTime cacheTime = DateTime.Now;
 
     /// <summary>进程名 → 它的窗口（按前后顺序，最前面的在第一个）。</summary>
-    public static Dictionary<string, List<IntPtr>> Snapshot()
+    public static Dictionary<string, List<IntPtr>> Snapshot(IReadOnlySet<string> targets)
     {
         if ((DateTime.Now - cacheTime).TotalSeconds > 30) { PidCache.Clear(); cacheTime = DateTime.Now; }
         var map = new Dictionary<string, List<IntPtr>>(StringComparer.OrdinalIgnoreCase);
@@ -259,7 +259,7 @@ internal static class WindowTracker
         {
             if (!IsAppWindow(h)) return true;
             var exe = ExeOf(h);
-            if (exe == null) return true;
+            if (exe == null || !targets.Contains(exe)) return true;
             if (!map.TryGetValue(exe, out var list)) map[exe] = list = new List<IntPtr>();
             list.Add(h);
             return true;
@@ -267,9 +267,10 @@ internal static class WindowTracker
         return map;
     }
 
-    static bool IsAppWindow(IntPtr h)
+    public static bool IsAppWindow(IntPtr h)
     {
         if (!Native.IsWindowVisible(h)) return false;
+        if (Native.GetAncestor(h, Native.GA_ROOT) != h) return false;
         if (Native.GetWindow(h, Native.GW_OWNER) != IntPtr.Zero) return false;
         long ex = (long)Native.GetWindowLongPtr(h, Native.GWL_EXSTYLE);
         if ((ex & Native.WS_EX_TOOLWINDOW) != 0 && (ex & Native.WS_EX_APPWINDOW) == 0) return false;
@@ -297,6 +298,29 @@ internal static class WindowTracker
         }
         PidCache[pid] = name;
         return name;
+    }
+}
+
+internal sealed class WindowEvents(Native.WinEventProc onChange) : IDisposable
+{
+    readonly IntPtr[] hooks = new IntPtr[3];
+
+    public bool Start()
+    {
+        hooks[0] = Subscribe(Native.EVENT_OBJECT_DESTROY, Native.EVENT_OBJECT_HIDE);
+        hooks[1] = Subscribe(Native.EVENT_OBJECT_NAMECHANGE, Native.EVENT_OBJECT_NAMECHANGE);
+        hooks[2] = Subscribe(Native.EVENT_OBJECT_CLOAKED, Native.EVENT_OBJECT_UNCLOAKED);
+        return hooks.All(hook => hook != IntPtr.Zero);
+    }
+
+    IntPtr Subscribe(uint from, uint to) =>
+        Native.SetWinEventHook(from, to, IntPtr.Zero, onChange, 0, 0, Native.WINEVENT_SKIPOWNPROCESS);
+
+    public void Dispose()
+    {
+        foreach (var hook in hooks)
+            if (hook != IntPtr.Zero) Native.UnhookWinEvent(hook);
+        Array.Clear(hooks);
     }
 }
 

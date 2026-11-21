@@ -8,7 +8,6 @@ namespace BeautyDock;
 /// <summary>设置项改变时影响的范围。越靠前越便宜，Dock 只做必要的那一部分。</summary>
 internal enum SettingChange
 {
-    None,       // 只改配置值，用到时再读（动画效果种类）
     Topmost,    // 改一个窗口属性
     Indicators, // 刷新运行指示器
     Position,   // 只重新定位，不重建图标
@@ -60,16 +59,6 @@ internal sealed class SettingsWindow : Window
         p.Children.Add(Slider("水平位置", -100, 100, 1, () => cfg.Alignment, v => cfg.Alignment = v,
             v => v == 0 ? "居中" : v < 0 ? $"偏左 {-v:0}%" : $"偏右 {v:0}%", SettingChange.Position));
         p.Children.Add(Check("始终置顶", () => cfg.Topmost, v => cfg.Topmost = v, SettingChange.Topmost));
-
-        p.Children.Add(Header("效果"));
-        p.Children.Add(Combo("鼠标悬停", new[] { ("持续跳动", "jump"), ("跳一下", "jumpOnce"), ("无", "none") },
-            () => cfg.Effects.Hover, v => cfg.Effects.Hover = v));
-        p.Children.Add(Combo("启动程序", new[] { ("弹跳", "bounce"), ("无", "none") },
-            () => cfg.Effects.Launch, v => cfg.Effects.Launch = v));
-        p.Children.Add(Combo("程序求关注", new[] { ("音爆", "sonicboom"), ("无", "none") },
-            () => cfg.Effects.Attention, v => cfg.Effects.Attention = v));
-        p.Children.Add(Combo("移除图标", new[] { ("爆炸", "explosion"), ("无", "none") },
-            () => cfg.Effects.Delete, v => cfg.Effects.Delete = v));
 
         p.Children.Add(Header("其它"));
         // 开机启动只写注册表，不影响 Dock 画面
@@ -127,7 +116,6 @@ internal sealed class SettingsWindow : Window
         cfg.BackgroundOpacity = d.BackgroundOpacity;
         cfg.Topmost = d.Topmost;
         cfg.ShowRunningIndicators = d.ShowRunningIndicators;
-        cfg.Effects = new EffectsConfig();
         apply(SettingChange.Topmost);
         apply(SettingChange.Rebuild);
         Build(animate: false); // 刷新界面上的数值；不播入场动画
@@ -191,20 +179,5 @@ internal sealed class SettingsWindow : Window
             if (change is { } ch) apply(ch);
         };
         return Row(label, c);
-    }
-
-    Grid Combo(string label, (string Text, string Value)[] options, Func<string> get, Action<string> set)
-    {
-        var cb = new ComboBox { VerticalAlignment = VerticalAlignment.Center, MinWidth = 160, HorizontalAlignment = HorizontalAlignment.Left };
-        foreach (var (text, _) in options) cb.Items.Add(text);
-        int idx = Array.FindIndex(options, o => o.Value.Equals(get(), StringComparison.OrdinalIgnoreCase));
-        cb.SelectedIndex = idx < 0 ? 0 : idx;
-        cb.SelectionChanged += (_, _) =>
-        {
-            if (cb.SelectedIndex < 0) return;
-            set(options[cb.SelectedIndex].Value);
-            apply(SettingChange.None); // 效果种类在播放时才读取，不用重画 Dock
-        };
-        return Row(label, cb);
     }
 }

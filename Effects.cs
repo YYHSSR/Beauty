@@ -48,60 +48,6 @@ internal static class Effects
 {
     static readonly Random Rng = new();
 
-    /// <summary>音爆：从图标中心连续扩散出冲击波圆环。center 为屏幕坐标（DIP）。</summary>
-    public static void SonicBoom(Point center, double s, int bursts, double interval)
-    {
-        double size = s * 4.5;
-        var fx = new FxWindow(center.X - size / 2, center.Y - size / 2, size, size);
-        var dur = TimeSpan.FromSeconds(0.55);
-
-        for (int b = 0; b < bursts; b++)
-        {
-            double t0 = b * interval;
-
-            // 中心的冲击闪光
-            var flash = new Ellipse
-            {
-                Width = size * 0.45, Height = size * 0.45, Opacity = 0, RenderTransformOrigin = new Point(0.5, 0.5),
-                Fill = new RadialGradientBrush
-                {
-                    GradientStops =
-                    {
-                        new GradientStop(Color.FromArgb(200, 255, 255, 255), 0),
-                        new GradientStop(Color.FromArgb(90, 150, 220, 255), 0.55),
-                        new GradientStop(Color.FromArgb(0, 150, 220, 255), 1),
-                    },
-                },
-            };
-            var fs = new ScaleTransform(0.3, 0.3);
-            flash.RenderTransform = fs;
-            fx.Add(flash, (size - flash.Width) / 2, (size - flash.Height) / 2);
-            Grow(fs, 0.3, 1.1, t0, 0.3);
-            Fade(flash, 0.9, t0, 0.3);
-
-            // 三道冲击波圆环
-            for (int k = 0; k < 3; k++)
-            {
-                var ring = new Ellipse
-                {
-                    Width = size * 0.95, Height = size * 0.95, Opacity = 0,
-                    RenderTransformOrigin = new Point(0.5, 0.5),
-                    StrokeThickness = s * (k == 0 ? 0.09 : 0.055),
-                    Stroke = new SolidColorBrush(k == 0 ? Color.FromArgb(235, 255, 255, 255) : Color.FromArgb(200, 140, 215, 255)),
-                };
-                var st = new ScaleTransform(0.12, 0.12);
-                ring.RenderTransform = st;
-                fx.Add(ring, size * 0.025, size * 0.025);
-                double begin = t0 + k * 0.09;
-                Grow(st, 0.12, 1.0, begin, dur.TotalSeconds);
-                Fade(ring, 0.95, begin, dur.TotalSeconds);
-            }
-        }
-
-        fx.Show();
-        fx.CloseAfter((bursts - 1) * interval + 0.9);
-    }
-
     /// <summary>爆炸：闪光 + 火花四溅 + 烟雾。center 为屏幕坐标（DIP）。</summary>
     public static void Explosion(Point center, double s)
     {
